@@ -19,6 +19,7 @@ import cv2
 
 OUTPUT_DIR = "./Reconstruction/"
 CLIP_PATCH_SIZE = (64,64)
+EPSILON = 0.001 # 0.1mm resolution for testing occlusion
 
 def main():
     print(pathlib.Path.cwd())
@@ -63,18 +64,20 @@ def main():
         rgb_imgs_PIL.append(Image.open(rgb_img_file).convert('RGB'))
 
     # # Choose 1000 random points in order to reduce computation time
-    # pcd_sample_idxs = np.random.choice(pcd.shape[0], 1000, replace=False)
+    # pcd_sample_idxs = np.random.choice(pcd.shape[0], 250, replace=False)
     # pcd_sample_idxs = np.flip(np.append(pcd_sample_idxs,2820054)) # view 9
     # pcd_sample_idxs = np.flip(np.append(pcd_sample_idxs,5891924)) # view 19
-    
     # pcd_samples = pcd[pcd_sample_idxs,:]
+    
     pcd_samples = pcd
 
     pcd_processed = []
+    depth_imgs = []
     # 1.1 Project all points into all camera views first
     for view_idx in tqdm.trange(len(pose), desc="Projecting points into all camera views", colour="green"):
         pcd_processed.append(getUVDepthCoordinates(pose[view_idx], K[view_idx], pcd_samples))
-
+    for depth_img_file in depth_img_files:
+        depth_imgs.append(read_depth_exr_file(str(depth_img_file)))
     uvz = getALLUVZCoordinates(pcd_processed, 0)
     pcd_features = {} # {xyz: [features]}
     missing_points = set()
@@ -87,18 +90,16 @@ def main():
         for view_idx in range(len(pose)):
             # Get uv coordinates and check if in image
             u, v, depth = pcd_processed[view_idx][:,point_idx]
-            u, v, depth = int(u), int(v), np.float32(round_to_5_decimal_places(depth.item()))
+            u, v, depth = int(u), int(v), depth.item()
 
             # extra check to see if point is within bounds of image
             if ((u >= CLIP_PATCH_SIZE[0]) and (u < imwidth - CLIP_PATCH_SIZE[0]) and
                 (v >= CLIP_PATCH_SIZE[1]) and (v < imheight - CLIP_PATCH_SIZE[1]) and
                 (depth >= 0)):
-
                 # If the point is in image, check if depth is greater than depth_img at that pixel
-                depth_img = read_depth_exr_file(str(depth_img_files[view_idx]))
-                ground_truth_depth = np.float32(round_to_5_decimal_places(depth_img[v,u].item())) 
-                if ground_truth_depth >= depth:
-                    # Point is valid
+                depth_img = depth_imgs[view_idx]
+                ground_truth_depth = depth_img[v,u].item()
+                if abs(ground_truth_depth - depth) < EPSILON:
                     view_visible.append(view_idx)
                     uv_coords.append([u,v])
             else:
@@ -107,12 +108,6 @@ def main():
         # Basically, if the point isn't visible from any POV, skip it.
         # There's a bunch of extra functions for debugging.
         if len(view_visible) == 0:
-            # correct_view = pcd_views[pcd_sample_idxs[point_idx]][0]
-            # ground_truth_uvDepth = getUVDepthCoordinates(pose[correct_view], K[correct_view], pcd[[pcd_sample_idxs[point_idx]],:])
-            # u, v, depth = int(ground_truth_uvDepth[0]), int(ground_truth_uvDepth[1]), np.float32(round_to_5_decimal_places(ground_truth_uvDepth[2][0].item()))
-            # read_depth = np.float32(round_to_5_decimal_places(read_depth_exr_file(str(depth_img_files[correct_view]))[v,u].item()))
-            # ground_truth_uvDepth = np.concatenate(ground_truth_uvDepth, axis=0)
-            # missing_points.add((tuple(ground_truth_uvDepth.tolist()),correct_view))
             continue
 
         # 4. Run clip over that point from every visible camera view
