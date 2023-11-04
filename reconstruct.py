@@ -1,16 +1,17 @@
-import pathlib
-import matplotlib.pyplot as plt
-import numpy as np
+from decimal import Decimal, ROUND_HALF_UP
+import Imath
 import skimage.measure
+import torch
 import tqdm
 import trimesh
-import Imath
+import matplotlib.pyplot as plt
+import numpy as np
 import OpenEXR
-import torch
 import open3d as o3d
 import open_clip
+import pathlib
 from PIL import Image
-from decimal import Decimal, ROUND_HALF_UP
+import pyvista as pv
 
 import os
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
@@ -18,8 +19,10 @@ os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 import cv2
 
 OUTPUT_DIR = "./Reconstruction/"
+OUTPUT_FILE = "pcd_with_img_features.npz"
 CLIP_PATCH_SIZE = (64,64)
 EPSILON = 0.001 # 0.1mm resolution for testing occlusion
+QUERY = "a chair"
 
 def main():
     print(pathlib.Path.cwd())
@@ -43,51 +46,104 @@ def main():
     ################################################################################
     # Project the point cloud back onto the RGB image
 
-    ## BASIC METHOD
-    # 1. Load point clouds
-    # 2. Iterate over a single point in the point cloud
-    # 3. Find out what point of views the point is visible in
-    # 4. Run clip over that point from every visible camera view
-    # 5. Compute element-wise average for image_feature vectors
-    # 6. Backproject the feature vector into that point
-    # 7. Repeat 2-6 for all points in the point cloud
+    # generatePointCloudWithFeatures(_pcd_path=pcd_path, _pose=pose, _K=K, _rgb_img_files=rgb_img_files,
+    #                                _depth_img_files=depth_img_files, _clip_model=clip_model, 
+    #                                _output_dir=OUTPUT_DIR, _output_file=OUTPUT_FILE,
+    #                                _testing=True, _num_points=10000)
+
+    npzfile = np.load(os.path.join(OUTPUT_DIR,OUTPUT_FILE))
+    new_pcd = npzfile['arr_0']
+    colors = npzfile['arr_1']
+    img_features_l = npzfile['arr_2']
+
+    # Perform a query
+    text_feature = clip_model.getTextFeatures(QUERY)
+    text_feature /= text_feature.norm(dim=-1, keepdim=True)
+
+    heatmap_colors = []
+    similarity_scores = []
+    # Calculate
+    for img_features in tqdm.tqdm(img_features_l, desc="Calculating similarity scores", colour="green"):
+        img_features = torch.from_numpy(img_features)
+        similarity_scores.append((text_feature.cpu().numpy() @ img_features.cpu().numpy().T))
+        heatmap_colors.append(plt.cm.turbo(similarity_scores[-1])[:, :3][0])
+    
+    heatmap_colors = np.array(heatmap_colors)
+    cloud = trimesh.PointCloud(vertices=new_pcd, colors=heatmap_colors)
+    
+    output_file = QUERY.replace(" ","_") + ".ply"
+    cloud.export(os.path.join(OUTPUT_DIR,output_file))
+    
+    
+    exit()
+
+def generatePointCloudWithFeatures(_pcd_path, _pose, _K, _rgb_img_files,
+                                   _depth_img_files, _clip_model, _output_dir,
+                                   _output_file = "pcd_with_img_features.npz",
+                                   _testing = True, _num_points = 250):
+    """
+    Generate a point cloud with image features from CLIP.
+
+    BASIC METHOD
+    1. Load point clouds
+    2. Iterate over a single point in the point cloud
+    3. Find out what point of views the point is visible in
+    4. Run clip over that point from every visible camera view
+    5. Compute element-wise average for image_feature vectors
+    6. Backproject the feature vector into that point
+    7. Repeat 2-6 for all points in the point cloud
+
+    @param _pcd_path: path to point cloud
+    @param _pose: list of camera poses
+    @param _K: list of camera intrinsics
+    @param _rgb_img_files: list of RGB images
+    @param _depth_img_files: list of depth images
+    @param _clip_model: CLIP model
+    @param _output_dir: output directory
+    @param _testing: whether to run in testing mode
+    @param _num_points: number of points to sample in testing mode
+    """
+
+    imheight, imwidth, _ = cv2.imread(str(_rgb_img_files[0])).shape
 
     # 1. Load point clouds
     pcd = []
-    pcd_o3d = o3d.io.read_point_cloud(pcd_path)
+    pcd_o3d = o3d.io.read_point_cloud(_pcd_path)
     pcd.append(np.asarray(pcd_o3d.points))
     pcd = np.concatenate(pcd, axis=0)
     
     # Load all rgb_imgs
     rgb_imgs_PIL = []
-    for rgb_img_file in rgb_img_files:
+    for rgb_img_file in _rgb_img_files:
         rgb_imgs_PIL.append(Image.open(rgb_img_file).convert('RGB'))
 
-    # # Choose 1000 random points in order to reduce computation time
-    # pcd_sample_idxs = np.random.choice(pcd.shape[0], 250, replace=False)
-    # pcd_sample_idxs = np.flip(np.append(pcd_sample_idxs,2820054)) # view 9
-    # pcd_sample_idxs = np.flip(np.append(pcd_sample_idxs,5891924)) # view 19
-    # pcd_samples = pcd[pcd_sample_idxs,:]
-    
-    pcd_samples = pcd
+    if _testing:
+        # Choose X random points in order to reduce computation time
+        pcd_sample_idxs = np.random.choice(pcd.shape[0], _num_points, replace=False)
+        # pcd_sample_idxs = np.flip(np.append(pcd_sample_idxs,2820054)) # view 9
+        # pcd_sample_idxs = np.flip(np.append(pcd_sample_idxs,5891924)) # view 19
+        pcd_samples = pcd[pcd_sample_idxs,:]
+    else:
+        pcd_samples = pcd
 
     pcd_processed = []
     depth_imgs = []
     # 1.1 Project all points into all camera views first
-    for view_idx in tqdm.trange(len(pose), desc="Projecting points into all camera views", colour="green"):
-        pcd_processed.append(getUVDepthCoordinates(pose[view_idx], K[view_idx], pcd_samples))
-    for depth_img_file in depth_img_files:
+    for view_idx in tqdm.trange(len(_pose), desc="Projecting points into all camera views", colour="green"):
+        pcd_processed.append(getUVDepthCoordinates(_pose[view_idx], _K[view_idx], pcd_samples))
+    for depth_img_file in _depth_img_files:
         depth_imgs.append(read_depth_exr_file(str(depth_img_file)))
-    uvz = getALLUVZCoordinates(pcd_processed, 0)
     pcd_features = {} # {xyz: [features]}
-    missing_points = set()
+    new_pcd = []
+    img_features_l = []
+    colors = []
     # 2. Iterate over a single point in the point cloud
     for point_idx in tqdm.trange(len(pcd_samples), desc="Iterating over all points in the point cloud", colour="green"):
         # Test for occlusion
         view_visible = []
         uv_coords = []
         # 3. Find out what point of views the point is visible in
-        for view_idx in range(len(pose)):
+        for view_idx in range(len(_pose)):
             # Get uv coordinates and check if in image
             u, v, depth = pcd_processed[view_idx][:,point_idx]
             u, v, depth = int(u), int(v), depth.item()
@@ -96,7 +152,6 @@ def main():
             if ((u >= CLIP_PATCH_SIZE[0]) and (u < imwidth - CLIP_PATCH_SIZE[0]) and
                 (v >= CLIP_PATCH_SIZE[1]) and (v < imheight - CLIP_PATCH_SIZE[1]) and
                 (depth >= 0)):
-                # If the point is in image, check if depth is greater than depth_img at that pixel
                 depth_img = depth_imgs[view_idx]
                 ground_truth_depth = depth_img[v,u].item()
                 if abs(ground_truth_depth - depth) < EPSILON:
@@ -105,21 +160,25 @@ def main():
             else:
                 continue
 
-        # Basically, if the point isn't visible from any POV, skip it.
-        # There's a bunch of extra functions for debugging.
+        # If the point isn't visible from any POV, skip it.
         if len(view_visible) == 0:
             continue
 
         # 4. Run clip over that point from every visible camera view
         imgs = [rgb_imgs_PIL[i] for i in view_visible]
-        img_features = clip_model.getClipFeatureForPatch(imgs, uv_coords)
+        img_features = _clip_model.getImageFeatureForPatch(imgs, uv_coords)
+        colors.append(getColorAtPixel(imgs, uv_coords))
+        new_pcd.append(pcd_samples[point_idx,:])
+        img_features_l.append(img_features)
 
         # 5. Backproject clip feature into point
         pcd_features[tuple(pcd_samples[point_idx,:].tolist())] = img_features
 
-    print(len(pcd_features))
-    
-    exit()
+    # Export point cloud into npz file
+    new_pcd = np.stack(new_pcd,axis=0)
+    colors = np.stack(colors,axis=0)
+    img_features_l = np.stack(img_features_l,axis=0)
+    np.savez(os.path.join(_output_dir, _output_file), new_pcd, colors, img_features_l)
 
 class CLIP():
     def __init__(self, _patch_size):
@@ -127,18 +186,18 @@ class CLIP():
         self.patch_size = _patch_size
         print("Model parameters:", f"{np.sum([int(np.prod(p.shape)) for p in self.model.parameters()]):,}")
 
-    def getClipFeatureForPatch(self, _images, _uv_coords):
+    def getImageFeatureForPatch(self, _images, _uv_coords):
         """
-        Get CLIP features for a list of images. Averages the CLIP features for all images
+        Get image features for a list of images. Averages the image features for all images
         and returns a single vector.
         @param _images: list of images
-        @return: CLIP features
+        @return: image features
         """      
         # Get correct patch regions
         crop_regions = []
         for u,v in _uv_coords:
             crop_regions.append([u-self.patch_size[0]/2, v-self.patch_size[1]/2, 
-                                u+self.patch_size[0]/2, v+self.patch_size[1]/2])
+                                 u+self.patch_size[0]/2, v+self.patch_size[1]/2])
             
         # Take patches from image and preprocess
         images = [self.preprocess(image.crop(crop_regions[idx])) for idx,image in enumerate(_images)]
@@ -146,12 +205,34 @@ class CLIP():
         image_inputs = torch.tensor(np.stack(images))
         with torch.no_grad():
             image_features = self.model.encode_image(image_inputs).float()
-
+            image_features /= image_features.norm(dim=-1, keepdim=True)
+        # TODO: should the norm be done before or after averaging?
         # 5. Compute element-wise average for image_feature vectors
         mean_features = torch.mean(image_features, dim=0)
 
-        return image_features
+        return mean_features
     
+    def getTextFeatures(self, _text):
+        with torch.no_grad():
+            text_tokens = open_clip.tokenizer.tokenize([_text])
+            return self.model.encode_text(text_tokens).float()
+
+def getColorAtPixel(_imgs, _uv_coords):
+    """
+    @param _img: RGB image
+    @param _uv: uv coordinates
+    @return: color at pixel
+    """
+    color = []
+    for idx, img in enumerate(_imgs):
+        u, v = _uv_coords[idx]
+        if u < 0 or v < 0:
+            continue
+        else:
+            color.append(img.getpixel((u,v)))
+    
+    return np.mean(color, axis=0).astype(np.uint8)
+
 def round_to_5_decimal_places(number):
     """
     @return rounds floats to 5 decimal places.
