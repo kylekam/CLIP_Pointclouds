@@ -19,10 +19,10 @@ os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 import cv2
 
 OUTPUT_DIR = "./Reconstruction/"
-OUTPUT_FILE = "pcd_with_img_features.npz"
-CLIP_PATCH_SIZE = (64,64)
+OUTPUT_FILE = "pcd_with_img_features_256.npz"
+CLIP_PATCH_SIZE = (128,128)
 EPSILON = 0.001 # 0.1mm resolution for testing occlusion
-QUERY = "a chair"
+QUERY = "where are the chairs"
 
 def main():
     print(pathlib.Path.cwd())
@@ -49,7 +49,7 @@ def main():
     # generatePointCloudWithFeatures(_pcd_path=pcd_path, _pose=pose, _K=K, _rgb_img_files=rgb_img_files,
     #                                _depth_img_files=depth_img_files, _clip_model=clip_model, 
     #                                _output_dir=OUTPUT_DIR, _output_file=OUTPUT_FILE,
-    #                                _testing=True, _num_points=10000)
+    #                                _testing=True, _num_points=100000)
 
     npzfile = np.load(os.path.join(OUTPUT_DIR,OUTPUT_FILE))
     new_pcd = npzfile['arr_0']
@@ -60,20 +60,20 @@ def main():
     text_feature = clip_model.getTextFeatures(QUERY)
     text_feature /= text_feature.norm(dim=-1, keepdim=True)
 
-    heatmap_colors = []
-    similarity_scores = []
     # Calculate
-    for img_features in tqdm.tqdm(img_features_l, desc="Calculating similarity scores", colour="green"):
+    similarity_scores = np.empty(len(img_features_l))
+    for i, img_features in enumerate(tqdm.tqdm(img_features_l, desc="Calculating similarity scores", colour="green")):
         img_features = torch.from_numpy(img_features)
-        similarity_scores.append((text_feature.cpu().numpy() @ img_features.cpu().numpy().T))
-        heatmap_colors.append(plt.cm.turbo(similarity_scores[-1])[:, :3][0])
-    
-    heatmap_colors = np.array(heatmap_colors)
-    cloud = trimesh.PointCloud(vertices=new_pcd, colors=heatmap_colors)
+        temp = text_feature.cpu().numpy() @ img_features.cpu().numpy().T
+        similarity_scores[i] = temp[0]
+    norm_scores = similarity_scores / np.max(similarity_scores)
+    heatmap_colors_norm = [plt.cm.turbo(score)[:3] for score in norm_scores]
+    heatmap_colors_norm = np.array(heatmap_colors_norm)
+
+    cloud = trimesh.PointCloud(vertices=new_pcd, colors=heatmap_colors_norm)
     
     output_file = QUERY.replace(" ","_") + ".ply"
     cloud.export(os.path.join(OUTPUT_DIR,output_file))
-    
     
     exit()
 
