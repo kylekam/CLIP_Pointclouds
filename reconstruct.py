@@ -12,75 +12,141 @@ import open_clip
 import pathlib
 from PIL import Image
 import pyvista as pv
+import glob
 
 import os
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 
 import cv2
 
-OUTPUT_DIR = "./Reconstruction/"
-OUTPUT_FILE = "pcd_with_img_features_256.npz"
+OUTPUT_DIR = "./Reconstruction/output/scannet"
+NPZ_FILE = "pcd_with_img_features_test.npz"
+PCD_FILE = "pcd_test.ply"
 CLIP_PATCH_SIZE = (128,128)
-EPSILON = 0.001 # 0.1mm resolution for testing occlusion
-QUERY = "where are the chairs"
+QUERY = "¿dónde están mis zapatos?"
+PERFORMING_QUERY = True
+TESTING = True
+SYNTHETIC = False
+
+if SYNTHETIC:
+    EPSILON = 0.001 # 0.001 = 0.1mm resolution for testing occlusion
+else:
+    EPSILON = 0.05
+
+
+# TODO: normalizing RGB images for CLIP input
+# TODO: use same color map as the example from Noah
+# TODO: try better CLIP model?
 
 def main():
+    clip_model = CLIP(CLIP_PATCH_SIZE)
+    pcd_path = os.path.join(OUTPUT_DIR,PCD_FILE)
+
+    if SYNTHETIC:
+        depth_img_files, rgb_img_files, pose, K = loadSyntheticData()
+    else:
+        if TESTING:
+            depth_img_files, rgb_img_files, pose, K = loadScannetTest(0.1)
+        else:
+            depth_img_files, rgb_img_files, pose, K = loadScannet(0.35)
+    
+
+    ################################################################################
+    # Back-project point cloud
+
+    if SYNTHETIC:
+        createPointCloud(depth_img_files, rgb_img_files, pose, K, OUTPUT_DIR, 
+                         PCD_FILE, export=False)
+    else:
+        createScannnetPointCloud(depth_img_files, rgb_img_files, pose, 
+                                 K, OUTPUT_DIR, PCD_FILE, export=True)
+
+    ################################################################################
+    # Project the point cloud back onto the RGB image
+
+    generatePointCloudWithFeatures(_pcd_path=pcd_path, _pose=pose, _K=K, _rgb_img_files=rgb_img_files,
+                                   _depth_img_files=depth_img_files, _clip_model=clip_model, 
+                                   _output_dir=OUTPUT_DIR, _output_file=NPZ_FILE,
+                                   _testing=TESTING, _scannet=(not SYNTHETIC), _num_points=100000)
+
+    npzfile = np.load(os.path.join(OUTPUT_DIR,NPZ_FILE))
+    new_pcd = npzfile['arr_0']
+    colors = npzfile['arr_1']
+    img_features_l = npzfile['arr_2']
+
+    # Perform a query
+    if PERFORMING_QUERY:
+        text_feature = clip_model.getTextFeatures(QUERY)
+        text_feature /= text_feature.norm(dim=-1, keepdim=True)
+
+        # Calculate
+        similarity_scores = np.empty(len(img_features_l))
+        for i, img_features in enumerate(tqdm.tqdm(img_features_l, desc="Calculating similarity scores", colour="green")):
+            img_features = torch.from_numpy(img_features)
+            temp = text_feature.cpu().numpy() @ img_features.cpu().numpy().T
+            similarity_scores[i] = temp[0]
+        norm_scores = similarity_scores / np.max(similarity_scores)
+        heatmap_colors_norm = [plt.cm.turbo(score)[:3] for score in norm_scores]
+        heatmap_colors_norm = np.array(heatmap_colors_norm)
+
+        cloud = trimesh.PointCloud(vertices=new_pcd, colors=heatmap_colors_norm)
+        
+        output_file = QUERY.replace(" ","_") + ".ply"
+        cloud.export(os.path.join(OUTPUT_DIR,output_file))
+    elif TESTING:
+        cloud = trimesh.PointCloud(vertices=new_pcd, colors=colors)
+        cloud.export(os.path.join(OUTPUT_DIR,"color_test.ply"))
+
+
+    exit()
+
+def loadScannet(_tdist = 0.1):
+    scene_dir = pathlib.Path("./Reconstruction/scannet_scene")
+    rgb_img_files = np.array(sorted(
+        glob.glob(os.path.join(scene_dir, "color/*.jpg")),
+        key=lambda f: int(os.path.basename(f).split(".")[0]),
+    ))
+    depth_img_files = np.array(sorted(
+        glob.glob(os.path.join(scene_dir, "depth/*.png")),
+        key=lambda f: int(os.path.basename(f).split(".")[0]),
+    ))
+    posefiles = sorted(
+        glob.glob(os.path.join(scene_dir, "pose/*.txt")),
+        key=lambda f: int(os.path.basename(f).split(".")[0]),
+    )
+    poses = torch.from_numpy(np.stack([np.loadtxt(f) for f in posefiles], axis=0)).float()
+
+    K_file_depth = os.path.join(scene_dir, "intrinsic/intrinsic_depth.txt")
+    K_depth = torch.from_numpy(np.loadtxt(K_file_depth)).float()[:3, :3]
+
+    # Filter out views that are close together
+    kf_idx = [0]
+    last_kf_pose = poses[0]
+    for i in range(1, len(poses)):
+        tdist = torch.norm(poses[i, :3, 3] - last_kf_pose[:3, 3])
+        if tdist > _tdist:
+            kf_idx.append(i)
+            last_kf_pose = poses[i]
+    kf_idx = np.array(kf_idx)
+    
+    return depth_img_files[kf_idx], rgb_img_files[kf_idx], poses[kf_idx], K_depth
+
+def loadSyntheticData():
     print(pathlib.Path.cwd())
     scene_dir = pathlib.Path("./Reconstruction/scene_0000")
-    pcd_path = os.path.join(OUTPUT_DIR,"pcd.ply")
     # Load files
     depth_img_files = sorted(scene_dir.glob("depth/*/img0002.exr"))
     rgb_img_files = sorted(scene_dir.glob("rgb/*/img0002.jpg"))
     cam_npz = np.load(scene_dir / "cameras.npz")
     pose = cam_npz.f.pose # camera-to-world
     K = cam_npz.f.K
-    clip_model = CLIP(CLIP_PATCH_SIZE)
 
-    imheight, imwidth, _ = cv2.imread(str(rgb_img_files[0])).shape
-
-    ################################################################################
-    # Back-project point cloud
-
-    # pcd1, pcd_colors, pcd_views = createPointCloud(depth_img_files, rgb_img_files, pose, K, export=False)
-
-    ################################################################################
-    # Project the point cloud back onto the RGB image
-
-    # generatePointCloudWithFeatures(_pcd_path=pcd_path, _pose=pose, _K=K, _rgb_img_files=rgb_img_files,
-    #                                _depth_img_files=depth_img_files, _clip_model=clip_model, 
-    #                                _output_dir=OUTPUT_DIR, _output_file=OUTPUT_FILE,
-    #                                _testing=True, _num_points=100000)
-
-    npzfile = np.load(os.path.join(OUTPUT_DIR,OUTPUT_FILE))
-    new_pcd = npzfile['arr_0']
-    colors = npzfile['arr_1']
-    img_features_l = npzfile['arr_2']
-
-    # Perform a query
-    text_feature = clip_model.getTextFeatures(QUERY)
-    text_feature /= text_feature.norm(dim=-1, keepdim=True)
-
-    # Calculate
-    similarity_scores = np.empty(len(img_features_l))
-    for i, img_features in enumerate(tqdm.tqdm(img_features_l, desc="Calculating similarity scores", colour="green")):
-        img_features = torch.from_numpy(img_features)
-        temp = text_feature.cpu().numpy() @ img_features.cpu().numpy().T
-        similarity_scores[i] = temp[0]
-    norm_scores = similarity_scores / np.max(similarity_scores)
-    heatmap_colors_norm = [plt.cm.turbo(score)[:3] for score in norm_scores]
-    heatmap_colors_norm = np.array(heatmap_colors_norm)
-
-    cloud = trimesh.PointCloud(vertices=new_pcd, colors=heatmap_colors_norm)
-    
-    output_file = QUERY.replace(" ","_") + ".ply"
-    cloud.export(os.path.join(OUTPUT_DIR,output_file))
-    
-    exit()
+    return depth_img_files, rgb_img_files, pose, K
 
 def generatePointCloudWithFeatures(_pcd_path, _pose, _K, _rgb_img_files,
                                    _depth_img_files, _clip_model, _output_dir,
                                    _output_file = "pcd_with_img_features.npz",
-                                   _testing = True, _num_points = 250):
+                                   _testing = True, _scannet = False, _num_points = 250):
     """
     Generate a point cloud with image features from CLIP.
 
@@ -104,8 +170,7 @@ def generatePointCloudWithFeatures(_pcd_path, _pose, _K, _rgb_img_files,
     @param _num_points: number of points to sample in testing mode
     """
 
-    imheight, imwidth, _ = cv2.imread(str(_rgb_img_files[0])).shape
-
+    imheight, imwidth, _ = cv2.imread(str(_depth_img_files[0])).shape
     # 1. Load point clouds
     pcd = []
     pcd_o3d = o3d.io.read_point_cloud(_pcd_path)
@@ -115,13 +180,12 @@ def generatePointCloudWithFeatures(_pcd_path, _pose, _K, _rgb_img_files,
     # Load all rgb_imgs
     rgb_imgs_PIL = []
     for rgb_img_file in _rgb_img_files:
-        rgb_imgs_PIL.append(Image.open(rgb_img_file).convert('RGB'))
+        img = Image.open(rgb_img_file).convert('RGB')
+        rgb_imgs_PIL.append(img.resize((imwidth,imheight)))
 
     if _testing:
         # Choose X random points in order to reduce computation time
         pcd_sample_idxs = np.random.choice(pcd.shape[0], _num_points, replace=False)
-        # pcd_sample_idxs = np.flip(np.append(pcd_sample_idxs,2820054)) # view 9
-        # pcd_sample_idxs = np.flip(np.append(pcd_sample_idxs,5891924)) # view 19
         pcd_samples = pcd[pcd_sample_idxs,:]
     else:
         pcd_samples = pcd
@@ -130,9 +194,16 @@ def generatePointCloudWithFeatures(_pcd_path, _pose, _K, _rgb_img_files,
     depth_imgs = []
     # 1.1 Project all points into all camera views first
     for view_idx in tqdm.trange(len(_pose), desc="Projecting points into all camera views", colour="green"):
-        pcd_processed.append(getUVDepthCoordinates(_pose[view_idx], _K[view_idx], pcd_samples))
+        if _scannet:
+            pcd_processed.append(getUVDepthCoordinates(_pose[view_idx], _K, pcd_samples))
+        else:
+            pcd_processed.append(getUVDepthCoordinates(_pose[view_idx], _K[view_idx], pcd_samples))
     for depth_img_file in _depth_img_files:
-        depth_imgs.append(read_depth_exr_file(str(depth_img_file)))
+        if _scannet:
+            img = cv2.imread(str(depth_img_file), cv2.IMREAD_ANYDEPTH)
+            depth_imgs.append(torch.from_numpy(img.astype(np.float32)) / 1000)
+        else:
+            depth_imgs.append(read_depth_exr_file(str(depth_img_file)))
     pcd_features = {} # {xyz: [features]}
     new_pcd = []
     img_features_l = []
@@ -359,7 +430,82 @@ def backprojectTest(pose, depth_img_files, rgb_img_files, K):
 
         _ = trimesh.PointCloud(final_pcd, colors=pcd_colors).export(os.path.join(OUTPUT_DIR,"pcd_colors.ply"))
 
-def createPointCloud(_depth_img_files, _rgb_img_files, _pose, _K, export = False):
+def loadScannetTest(_tdist=0.1):
+    scene_dir = pathlib.Path("./Reconstruction/scannet_scene")
+    rgb_img_files = np.array(sorted(
+        glob.glob(os.path.join(scene_dir, "color/*.jpg")),
+        key=lambda f: int(os.path.basename(f).split(".")[0]),
+    ))
+    depth_img_files = np.array(sorted(
+        glob.glob(os.path.join(scene_dir, "depth/*.png")),
+        key=lambda f: int(os.path.basename(f).split(".")[0]),
+    ))
+    posefiles = sorted(
+        glob.glob(os.path.join(scene_dir, "pose/*.txt")),
+        key=lambda f: int(os.path.basename(f).split(".")[0]),
+    )
+    poses = torch.from_numpy(np.stack([np.loadtxt(f) for f in posefiles], axis=0)).float()
+
+    K_file_depth = os.path.join(scene_dir, "intrinsic/intrinsic_depth.txt")
+    K_depth = torch.from_numpy(np.loadtxt(K_file_depth)).float()[:3, :3]
+    kf_idx = np.array([1,2,3,4,5])
+    
+    return depth_img_files[kf_idx], rgb_img_files[kf_idx], poses[kf_idx], K_depth
+
+def createScannnetPointCloud(_depth_img_files, _rgb_img_files, _pose,
+                             _K_depth, _output_dir, _output_file, export = False):
+    """
+    Iterate over all the camera views and create a point cloud with color from RGB images.
+    @param _depth_img_files: list of depth images
+    @param _rgb_img_files: list of RGB images
+    @param _pose: list of camera poses
+    @param _K: list of camera intrinsics
+    @return: point cloud and point cloud colors
+    """
+    imheight, imwidth, _ = cv2.imread(str(_depth_img_files[0])).shape
+    u = np.arange(imwidth)
+    v = np.arange(imheight)
+    uu, vv = np.meshgrid(u, v)
+    uv = np.c_[uu.flatten(), vv.flatten()]
+
+    # Iterate over all camera poses
+    pcd = []
+    pcd_colors = []
+    pcd_views = []
+
+    for view_idx in tqdm.trange(len(_pose)):
+        depth_img = cv2.imread(str(_depth_img_files[view_idx]), cv2.IMREAD_ANYDEPTH)
+        depth_img = torch.from_numpy(depth_img.astype(np.float32)) / 1000
+        rgb_img = cv2.imread(str(_rgb_img_files[view_idx]))[..., [2, 1, 0]]
+        
+
+        # Get pixels with image coordinates?
+        pix_vecs_depth = np.linalg.inv(_K_depth) @ np.c_[uv, np.ones((uv.shape[0], 1))].T
+        depth_array = depth_img.numpy().flatten()
+        xyz_cam = pix_vecs_depth * depth_array
+        good_idxs = np.where(depth_array > 0)[0] # Filter out points with 0 depth
+        xyz_cam = xyz_cam[:,good_idxs]
+
+        # Reshape RGB image according to depth image shape
+        rgb_img = cv2.resize(rgb_img, (depth_img.shape[1], depth_img.shape[0]), interpolation=cv2.INTER_AREA)
+        rgb_img = rgb_img.reshape(-1, 3)
+        rgb_img = rgb_img[good_idxs,:]
+
+        # Rotate matrix * xyz_cam + translation
+        pcd.append((_pose[view_idx, :3, :3] @ xyz_cam + _pose[view_idx, :3, 3:4]).T)
+        pcd_views.append(np.full((len(pcd[0]),1), view_idx))
+        pcd_colors.append(rgb_img.reshape(-1, 3))
+
+    pcd = np.concatenate(pcd, axis=0)
+    pcd_colors = np.concatenate(pcd_colors, axis=0)
+    pcd_views = np.concatenate(pcd_views, axis=0)
+
+    if export:
+        _ = trimesh.PointCloud(pcd, colors=pcd_colors).export(os.path.join(_output_dir, _output_file))
+   
+    return pcd, pcd_colors, pcd_views
+
+def createPointCloud(_depth_img_files, _rgb_img_files, _pose, _K, _output_dir, _output_file, export = False):
     """
     Iterate over all the camera views and create a point cloud with color from RGB images.
     @param _depth_img_files: list of depth images
@@ -380,10 +526,9 @@ def createPointCloud(_depth_img_files, _rgb_img_files, _pose, _K, export = False
     pcd_views = []
 
     for view_idx in tqdm.trange(len(_pose)):
-
         depth_img = read_depth_exr_file(str(_depth_img_files[view_idx]))
         rgb_img = cv2.imread(str(_rgb_img_files[view_idx]))[..., [2, 1, 0]]
-        
+
         # Get pixels with image coordinates?
         pix_vecs = np.linalg.inv(_K[view_idx]) @ np.c_[uv, np.ones((uv.shape[0], 1))].T
         xyz_cam = pix_vecs * depth_img.flatten()
@@ -398,7 +543,7 @@ def createPointCloud(_depth_img_files, _rgb_img_files, _pose, _K, export = False
     pcd_views = np.concatenate(pcd_views, axis=0)
 
     if export:
-        _ = trimesh.PointCloud(pcd, colors=pcd_colors).export(os.path.join(OUTPUT_DIR,"pcd.ply"))
+        _ = trimesh.PointCloud(pcd, colors=pcd_colors).export(os.path.join(_output_dir,_output_file))
    
     return pcd, pcd_colors, pcd_views
 
