@@ -1,6 +1,5 @@
 from decimal import Decimal, ROUND_HALF_UP
 import Imath
-import skimage.measure
 import torch
 import tqdm
 import trimesh
@@ -11,12 +10,8 @@ import open3d as o3d
 import open_clip
 import pathlib
 from PIL import Image
-import pyvista as pv
 import glob
-
 import os
-os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
-
 import cv2
 
 OUTPUT_DIR = "./Reconstruction/output/scannet"
@@ -25,17 +20,14 @@ PCD_FILE = "pcd_test.ply"
 CLIP_PATCH_SIZE = (128,128)
 QUERY = "¿dónde están mis zapatos?"
 PERFORMING_QUERY = True
-TESTING = True
-SYNTHETIC = False
+TESTING = False
+SYNTHETIC = True
 
 if SYNTHETIC:
     EPSILON = 0.001 # 0.001 = 0.1mm resolution for testing occlusion
 else:
     EPSILON = 0.05
 
-
-# TODO: normalizing RGB images for CLIP input
-# TODO: use same color map as the example from Noah
 # TODO: try better CLIP model?
 
 def main():
@@ -54,20 +46,22 @@ def main():
     ################################################################################
     # Back-project point cloud
 
-    if SYNTHETIC:
-        createPointCloud(depth_img_files, rgb_img_files, pose, K, OUTPUT_DIR, 
-                         PCD_FILE, export=False)
-    else:
-        createScannnetPointCloud(depth_img_files, rgb_img_files, pose, 
-                                 K, OUTPUT_DIR, PCD_FILE, export=True)
+    # if SYNTHETIC:
+    #     createPointCloud(depth_img_files, rgb_img_files, pose, K, OUTPUT_DIR, 
+    #                      PCD_FILE, export=False)
+    # else:
+    #     createScannnetPointCloud(depth_img_files, rgb_img_files, pose, 
+    #                              K, OUTPUT_DIR, PCD_FILE, export=True)
 
     ################################################################################
     # Project the point cloud back onto the RGB image
 
-    generatePointCloudWithFeatures(_pcd_path=pcd_path, _pose=pose, _K=K, _rgb_img_files=rgb_img_files,
-                                   _depth_img_files=depth_img_files, _clip_model=clip_model, 
-                                   _output_dir=OUTPUT_DIR, _output_file=NPZ_FILE,
-                                   _testing=TESTING, _scannet=(not SYNTHETIC), _num_points=100000)
+    # generatePointCloudWithFeatures(_pcd_path=pcd_path, _pose=pose, _K=K, _rgb_img_files=rgb_img_files,
+    #                                _depth_img_files=depth_img_files, _clip_model=clip_model, 
+    #                                _output_dir=OUTPUT_DIR, _output_file=NPZ_FILE,
+    #                                _testing=TESTING, _scannet=(not SYNTHETIC), _num_points=100000)
+
+    ################################################################################
 
     npzfile = np.load(os.path.join(OUTPUT_DIR,NPZ_FILE))
     new_pcd = npzfile['arr_0']
@@ -76,27 +70,16 @@ def main():
 
     # Perform a query
     if PERFORMING_QUERY:
-        text_feature = clip_model.getTextFeatures(QUERY)
-        text_feature /= text_feature.norm(dim=-1, keepdim=True)
-
-        # Calculate
-        similarity_scores = np.empty(len(img_features_l))
-        for i, img_features in enumerate(tqdm.tqdm(img_features_l, desc="Calculating similarity scores", colour="green")):
-            img_features = torch.from_numpy(img_features)
-            temp = text_feature.cpu().numpy() @ img_features.cpu().numpy().T
-            similarity_scores[i] = temp[0]
-        norm_scores = similarity_scores / np.max(similarity_scores)
-        heatmap_colors_norm = [plt.cm.turbo(score)[:3] for score in norm_scores]
-        heatmap_colors_norm = np.array(heatmap_colors_norm)
-
-        cloud = trimesh.PointCloud(vertices=new_pcd, colors=heatmap_colors_norm)
+        similarity_scores = clip_model.runQuery(img_features_l, QUERY)
+        heatmap_colors = [plt.cm.viridis(score)[:3] for score in similarity_scores]
+        heatmap_colors = np.array(heatmap_colors)
+        cloud = trimesh.PointCloud(vertices=new_pcd, colors=heatmap_colors)
         
-        output_file = QUERY.replace(" ","_") + ".ply"
+        output_file = QUERY.replace(" ","_").replace("?","").replace("¿","") + ".ply"
         cloud.export(os.path.join(OUTPUT_DIR,output_file))
     elif TESTING:
         cloud = trimesh.PointCloud(vertices=new_pcd, colors=colors)
         cloud.export(os.path.join(OUTPUT_DIR,"color_test.ply"))
-
 
     exit()
 
@@ -284,9 +267,35 @@ class CLIP():
         return mean_features
     
     def getTextFeatures(self, _text):
+        """
+        @param _text: list of text queries
+        @return text features
+        """
         with torch.no_grad():
-            text_tokens = open_clip.tokenizer.tokenize([_text])
-            return self.model.encode_text(text_tokens).float()
+            text_tokens = open_clip.tokenizer.tokenize(_text)
+            text_feature = self.model.encode_text(text_tokens).float()
+            text_feature /= text_feature.norm(dim=-1, keepdim=True)
+            return text_feature
+        
+    def runQuery(self, _img_features_l, _query):
+        """
+        @param _img_features: list of image features
+        @param _query: text query
+        @return similarity scores
+        """
+        labels = ["an object", "things", "stuff", "texture", _query]
+        labels = [f"a picture of {label}" for label in labels]
+        text_feature = self.getTextFeatures(labels)
+
+        # Calculate similarity scores
+        similarity_scores = np.empty(len(_img_features_l))
+        _img_features_l = torch.from_numpy(_img_features_l)
+        temp = 100 * _img_features_l @ text_feature.T
+        similarity_scores = temp.softmax(dim=-1)
+        similarity_scores = similarity_scores[:, -1] # select the query
+        similarity_scores = ((similarity_scores - 0.5) * 2).clamp(0, 1) # relu between 0 and 1
+        
+        return similarity_scores
 
 def getColorAtPixel(_imgs, _uv_coords):
     """
@@ -477,7 +486,6 @@ def createScannnetPointCloud(_depth_img_files, _rgb_img_files, _pose,
         depth_img = cv2.imread(str(_depth_img_files[view_idx]), cv2.IMREAD_ANYDEPTH)
         depth_img = torch.from_numpy(depth_img.astype(np.float32)) / 1000
         rgb_img = cv2.imread(str(_rgb_img_files[view_idx]))[..., [2, 1, 0]]
-        
 
         # Get pixels with image coordinates?
         pix_vecs_depth = np.linalg.inv(_K_depth) @ np.c_[uv, np.ones((uv.shape[0], 1))].T
