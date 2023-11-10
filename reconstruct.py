@@ -14,9 +14,9 @@ import glob
 import os
 import cv2
 
-OUTPUT_DIR = "./Reconstruction/output/scannet"
-NPZ_FILE = "pcd_with_img_features_test.npz"
-PCD_FILE = "pcd_test.ply"
+OUTPUT_DIR = "./Reconstruction/output/scannet" # Where to save/load files
+NPZ_FILE = "pcd_with_img_features_test.npz" # NPZ with img features to generate/load
+PCD_FILE = "pcd_test.ply" # Point cloud file to generate/load
 CLIP_PATCH_SIZE = (128,128)
 QUERY = "¿dónde están mis zapatos?"
 PERFORMING_QUERY = True
