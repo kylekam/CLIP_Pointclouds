@@ -14,13 +14,13 @@ import glob
 import os
 import cv2
 
-OUTPUT_DIR = "./Reconstruction/output/scannet" # Where to save/load files
-NPZ_FILE = "pcd_with_img_features_test.npz" # NPZ with img features to generate/load
-PCD_FILE = "pcd_test.ply" # Point cloud file to generate/load
+OUTPUT_DIR = "./Reconstruction/output/synthetic" # Where to save/load files
+NPZ_FILE = "pcd_with_img_features.npz" # NPZ with img features to generate/load
+PCD_FILE = "pcd.ply" # Point cloud file to generate/load
 CLIP_PATCH_SIZE = (128,128)
-QUERY = "¿dónde están mis zapatos?"
+QUERY = "where are the chairs?"
 PERFORMING_QUERY = True
-TESTING = False
+TESTING = False # enable to run on smaller subset of points
 SYNTHETIC = True
 
 if SYNTHETIC:
@@ -29,9 +29,16 @@ else:
     EPSILON = 0.05
 
 # TODO: try better CLIP model?
+# TODO: run full pcd through CLIP
 
 def main():
-    clip_model = CLIP(CLIP_PATCH_SIZE)
+    print("Is GPU available: ", torch.cuda.is_available())
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+
+    clip_model = CLIP(CLIP_PATCH_SIZE, device)
     pcd_path = os.path.join(OUTPUT_DIR,PCD_FILE)
 
     if SYNTHETIC:
@@ -46,29 +53,29 @@ def main():
     ################################################################################
     # Back-project point cloud
 
-    # if SYNTHETIC:
-    #     createPointCloud(depth_img_files, rgb_img_files, pose, K, OUTPUT_DIR, 
-    #                      PCD_FILE, export=False)
-    # else:
-    #     createScannnetPointCloud(depth_img_files, rgb_img_files, pose, 
-    #                              K, OUTPUT_DIR, PCD_FILE, export=True)
+    if SYNTHETIC:
+        createPointCloud(depth_img_files, rgb_img_files, pose, K, OUTPUT_DIR, 
+                         PCD_FILE, export=True)
+    else:
+        createScannnetPointCloud(depth_img_files, rgb_img_files, pose, 
+                                 K, OUTPUT_DIR, PCD_FILE, export=True)
 
     ################################################################################
     # Project the point cloud back onto the RGB image
 
-    # generatePointCloudWithFeatures(_pcd_path=pcd_path, _pose=pose, _K=K, _rgb_img_files=rgb_img_files,
-    #                                _depth_img_files=depth_img_files, _clip_model=clip_model, 
-    #                                _output_dir=OUTPUT_DIR, _output_file=NPZ_FILE,
-    #                                _testing=TESTING, _scannet=(not SYNTHETIC), _num_points=100000)
+    generatePointCloudWithFeatures(_pcd_path=pcd_path, _pose=pose, _K=K, _rgb_img_files=rgb_img_files,
+                                   _depth_img_files=depth_img_files, _clip_model=clip_model, 
+                                   _output_dir=OUTPUT_DIR, _output_file=NPZ_FILE,
+                                   _testing=TESTING, _scannet=(not SYNTHETIC), _num_points=10000)
 
     ################################################################################
+    # Perform a query
 
     npzfile = np.load(os.path.join(OUTPUT_DIR,NPZ_FILE))
     new_pcd = npzfile['arr_0']
     colors = npzfile['arr_1']
     img_features_l = npzfile['arr_2']
 
-    # Perform a query
     if PERFORMING_QUERY:
         similarity_scores = clip_model.runQuery(img_features_l, QUERY)
         heatmap_colors = [plt.cm.viridis(score)[:3] for score in similarity_scores]
@@ -152,8 +159,11 @@ def generatePointCloudWithFeatures(_pcd_path, _pose, _K, _rgb_img_files,
     @param _testing: whether to run in testing mode
     @param _num_points: number of points to sample in testing mode
     """
+    if _scannet:
+        imheight, imwidth, _ = cv2.imread(str(_depth_img_files[0])).shape
+    else:
+        imheight, imwidth, _ = cv2.imread(str(_rgb_img_files[0])).shape
 
-    imheight, imwidth, _ = cv2.imread(str(_depth_img_files[0])).shape
     # 1. Load point clouds
     pcd = []
     pcd_o3d = o3d.io.read_point_cloud(_pcd_path)
@@ -235,8 +245,10 @@ def generatePointCloudWithFeatures(_pcd_path, _pose, _K, _rgb_img_files,
     np.savez(os.path.join(_output_dir, _output_file), new_pcd, colors, img_features_l)
 
 class CLIP():
-    def __init__(self, _patch_size):
+    def __init__(self, _patch_size, _device):
         self.model, _, self.preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
+        self.model.to(_device)
+        self.device = _device
         self.patch_size = _patch_size
         print("Model parameters:", f"{np.sum([int(np.prod(p.shape)) for p in self.model.parameters()]):,}")
 
@@ -256,7 +268,7 @@ class CLIP():
         # Take patches from image and preprocess
         images = [self.preprocess(image.crop(crop_regions[idx])) for idx,image in enumerate(_images)]
 
-        image_inputs = torch.tensor(np.stack(images))
+        image_inputs = torch.tensor(np.stack(images)).to(self.device)
         with torch.no_grad():
             image_features = self.model.encode_image(image_inputs).float()
             image_features /= image_features.norm(dim=-1, keepdim=True)
