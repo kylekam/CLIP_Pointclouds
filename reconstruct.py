@@ -32,21 +32,22 @@ from line_profiler import LineProfiler
 # %load_ext line_profiler
 # %lprun -f 
 def main():
-    os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+    # os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
     OUTPUT_DIR = "./Reconstruction/output/scannet" # Where to save/load files
-    NPZ_FILE = "pcd_with_img_features_test_5k.npz" # NPZ with img features to generate/load
-    PCD_FILE = "pcd_test_5k.ply" # Point cloud file to generate/load
+    NPZ_FILE = "pcd_with_img_features_test_50k.npz" # NPZ with img features to generate/load
+    PCD_FILE = "pcd_test_200k.ply" # Point cloud file to generate/load
     CLIP_PATCH_SIZE = (128,128)
     # QUERY = "where are the chairs?"
     # QUERY = "¿dónde están mis zapatos?"
     QUERY = "where are the shoes?"
-    NUM_POINTS = 5000
+    NUM_POINTS = 50000
     PERFORMING_QUERY = True
     TESTING = True # enable to run on smaller subset of points
     SYNTHETIC = False
     MAX_EPOCHS = 10
     BATCH_SIZE = 1
     BLOCK_SIZE = 10
+    DISABLE_PROGRESS_BAR = True
 
     if SYNTHETIC:
         EPSILON = 0.001 # 0.001 = 0.1mm resolution for testing occlusion
@@ -102,7 +103,9 @@ def main():
     t2 = time.time()
     total_patches = 0
     # Load block of patches
-    for block in tqdm.tqdm(patchesBlocksGenerator, desc="Generating point cloud features", colour="green"):
+    
+    for block in tqdm.tqdm(patchesBlocksGenerator, desc="Generating point cloud features", 
+                           colour="green", disable=DISABLE_PROGRESS_BAR):
         block = {key: tensor.to(device) for key, tensor in block.items()}
         patches = clip_model.getPatches(block, dataset)
         total_patches += patches.shape[0]
@@ -328,16 +331,27 @@ class CLIP():
     def __init__(self, _patch_size, _device):
         self.model, _, self.preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
         self.model.to(_device)
+        self.model.eval()
         self.device = _device
         self.patch_size = torch.tensor(_patch_size).to(_device)
         self.preprocessed_tensor_size = (224,224)
+        self.transforms = torchvision.transforms.Compose([
+            torchvision.transforms.Resize((224,224)),
+            torchvision.transforms.CenterCrop((224,224)),
+            torchvision.transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
+                                             std=[0.26862954, 0.26130258, 0.27577711])
+        ])
+
         print("Model parameters:", f"{np.sum([int(np.prod(p.shape)) for p in self.model.parameters()]):,}")
 
-    def preprocessFunction(self, _patches):
+    def preprocessFunctionNoah(self, _patches):
         patches = torch.nn.functional.interpolate(
             _patches, size=(224, 224), mode="bilinear", align_corners=False
         )
         return patches
+    
+    def preprocessFunction(self, _patches):
+        return self.transforms(_patches)
     
     def getPatches(self, _block, _dataset):
         """
@@ -362,15 +376,14 @@ class CLIP():
                                                                   dim=0)
 
         # Take patches from image and preprocess
-        toPILImage = torchvision.transforms.ToPILImage()
         patches = torch.empty((0,3,self.preprocessed_tensor_size[0],
-                                self.preprocessed_tensor_size[1]),device=self.device)
+                               self.preprocessed_tensor_size[1]),device=self.device)
         for idx, image in enumerate(imgs):
             img_crop = torchvision.transforms.functional.crop(image, crop_regions[idx][0], crop_regions[idx][1],
                                                               crop_regions[idx][2], crop_regions[idx][3])
             
-            img = self.preprocess(toPILImage(img_crop)).to(self.device).unsqueeze(0)
-            # img = self.preprocessFunction(img_crop.unsqueeze(0))
+            img = self.preprocessFunction(img_crop).unsqueeze(0)
+            # img = self.preprocessFunctionNoah(img_crop.unsqueeze(0))
             patches = torch.cat((patches, img), dim=0)
         return patches
     
@@ -378,8 +391,6 @@ class CLIP():
         """
         Get image features for a block.
         """
-        for patch in _patches:
-            img = patch
         with torch.no_grad():
             image_features = self.model.encode_image(_patches).float()
         image_features /= image_features.norm(dim=-1, keepdim=True)
