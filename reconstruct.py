@@ -43,8 +43,8 @@ def main():
     TESTING = True # enable to run on smaller subset of points
     SYNTHETIC = True
     NUM_POINTS = 200000
-    BATCH_SIZE = 90 # 128 is pretty good
-    NUM_WORKERS = 16 # 16 is bad
+    BATCH_SIZE = 70 # 70 is best so far
+    NUM_WORKERS = 12 # 12 is good
     DISABLE_PROGRESS_BAR = False
     GPU_THROUGHPUT_SIZE = 200
     DATA_BUFFER_SIZE = 512 # 256 is pretty good
