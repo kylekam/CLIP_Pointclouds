@@ -42,7 +42,7 @@ def main():
     PERFORMING_QUERY = True
     TESTING = True # enable to run on smaller subset of points
     SYNTHETIC = True
-    BATCH_SIZE = 80 # 128 is pretty good
+    BATCH_SIZE = 90 # 128 is pretty good
     NUM_WORKERS = 16 # 16 is bad
     DISABLE_PROGRESS_BAR = False
     GPU_THROUGHPUT_SIZE = 200

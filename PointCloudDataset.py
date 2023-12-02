@@ -83,7 +83,7 @@ class SyntheticPCD(torch.utils.data.Dataset):
 
         if _testing:
             # Choose X random points in order to reduce computation time
-            pcd_sample_idxs = np.random.choice(self.pcd.shape[0], num_points, replace=False)
+            pcd_sample_idxs = np.random.choice(self.pcd.shape[0], _num_points, replace=False)
             self.pcd = self.pcd[pcd_sample_idxs,:]
         
         pcd_processed = []
@@ -325,7 +325,7 @@ class ScannetPCD(torch.utils.data.Dataset):
 
         if _testing:
             # Choose X random points in order to reduce computation time
-            pcd_sample_idxs = np.random.choice(self.pcd.shape[0], num_points, replace=False)
+            pcd_sample_idxs = np.random.choice(self.pcd.shape[0], _num_points, replace=False)
             self.pcd = self.pcd[pcd_sample_idxs,:]
         
         pcd_processed = []
