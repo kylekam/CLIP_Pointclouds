@@ -117,9 +117,7 @@ def main():
     t2 = time.time()
     
     print("Time spent waiting: ", time_spent_waiting)
-    print("Successful points: ", good_points_count)
     print("Time to process points: ", t2-t1)
-    print("Points per second: ", good_points_count / (t2-t1))
     print("Patches per second: ", patch_count / (t2-t1))
 
     new_pcd = np.stack(new_pcd.cpu(),axis=0)
