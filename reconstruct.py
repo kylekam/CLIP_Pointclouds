@@ -42,6 +42,7 @@ def main():
     PERFORMING_QUERY = True
     TESTING = True # enable to run on smaller subset of points
     SYNTHETIC = True
+    NUM_POINTS = 200000
     BATCH_SIZE = 90 # 128 is pretty good
     NUM_WORKERS = 16 # 16 is bad
     DISABLE_PROGRESS_BAR = False
@@ -67,11 +68,11 @@ def main():
     if SYNTHETIC:
         dataset = SyntheticPCD(_model=clip_model, _output_dir=OUTPUT_DIR, _output_file=PCD_FILE,
                                _epsilon=EPSILON, _tdist=0.1, _device="cpu", _testing=TESTING,
-                               _export=True, _patch_size=(128,128))
+                               _export=True, _num_points=NUM_POINTS, _patch_size=(128,128))
     else:
         dataset = ScannetPCD(_model=clip_model, _output_dir=OUTPUT_DIR, _output_file=PCD_FILE,
                              _epsilon=EPSILON, _tdist=0.35, _device="cpu", _testing=TESTING,
-                             _export=True, _patch_size=(128,128))
+                             _export=True, _num_points=NUM_POINTS, _patch_size=(128,128))
     
     qq = Queue()
     readerProc = startReaderProc(qq, clip_model, _save_path=os.path.join(OUTPUT_DIR, NPZ_FEATURES_FILE))
@@ -88,7 +89,6 @@ def main():
     pointsGenerator = torch.utils.data.DataLoader(dataset, batch_size=BATCH_SIZE,
                                                   shuffle=False, num_workers=NUM_WORKERS,
                                                   collate_fn=my_collator)
-    good_points_count = 0
     patch_count = 0
     time_spent_waiting = 0.0
     new_pcd = torch.empty((0,3), dtype=torch.float64)
@@ -98,7 +98,6 @@ def main():
     for point_l, color_l, patches_l, stop_idx_l, gpu_batch_idx_l in tqdm.tqdm(pointsGenerator, desc="Iterating over points",
                                            colour="green", disable=DISABLE_PROGRESS_BAR):
         if point_l.shape[0] != 0:
-            good_points_count += 1
             patch_count += patches_l.shape[0]
 
             new_pcd = torch.cat((new_pcd, point_l.cpu()),dim=0)
